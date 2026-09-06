@@ -178,9 +178,12 @@ For this application as it exists today, a persistent-process host (Section
 
 ### P0 — Before Ammu
 
-1. **No access control.** Deployed as-is, the app is a fully public,
-   unauthenticated endpoint that runs real OpenAI calls for anyone who has
-   the URL. Addressed by PR-2 (private pilot passcode).
+1. ~~**No access control.**~~ **Resolved in PR-2.** A private-pilot passcode
+   gate (`src/ammu_review/pilot_access.py`, wired into `ui/app.py::main()`)
+   now blocks the entire application entry point — no screen renders and
+   no orchestration/telemetry/OpenAI call is reachable — until the correct
+   `AMMU_PILOT_ACCESS_CODE` is entered for that browser session. See
+   Section 10.
 2. **No session/data isolation.** `store.list_assignment_ids()` is shown to
    every visitor in the sidebar "Resume an assignment" dropdown — any
    visitor who reaches the app can open *any* assignment ever created on
@@ -199,7 +202,11 @@ For this application as it exists today, a persistent-process host (Section
    `OPENAI_API_KEY` is currently supplied only via a local `.env`; the
    deployed host must set it as a platform secret, and `.env` must never be
    committed or baked into a deploy artifact (already gitignored — verify
-   this stays true on whichever host is chosen).
+   this stays true on whichever host is chosen). PR-2 adds a fail-fast,
+   presence-only check (`config.is_openai_api_key_configured()`) so a
+   missing key now shows a safe, generic error instead of a raw
+   construction error — see Section 10. The host must also set
+   `AMMU_PILOT_ACCESS_CODE` (new in PR-2) as a platform secret.
 
 ### P1 — Before an external pilot beyond Ammu
 
@@ -341,3 +348,88 @@ now:
 - Enterprise security architecture (RBAC, audit logging, SSO, etc.).
 - Actual deployment/hosting execution — this document recommends an
   approach; it does not stand up any infrastructure.
+
+## 10. PR-2 Implementation: Pilot Access & Configuration
+
+Implemented since the baseline above was written — resolves P0 items #1 and
+part of #4 (Section 5).
+
+**Secrets/configuration approach.** No new settings framework was
+introduced. `src/ammu_review/config.py` (existing) gained one small,
+additive function, `is_openai_api_key_configured()` — a presence-only check
+(no real API call) letting `ui/app.py` fail fast with a safe, generic
+message rather than a raw construction error surfacing from inside
+`ChatOpenAI` when the key is missing. A new sibling module,
+`src/ammu_review/pilot_access.py`, holds the pilot-access secret reader
+(`get_pilot_access_code()`) and a constant-time comparison
+(`check_access_code()`, via `hmac.compare_digest`). Neither function
+caches or logs the values it reads.
+
+**Required environment variables.**
+- `OPENAI_API_KEY` — required (unchanged from before PR-2).
+- `AMMU_PILOT_ACCESS_CODE` — new, required in any deployed environment. An
+  empty string is treated identically to unset (fails closed), so an
+  accidentally-blank platform secret can't silently disable the gate.
+- `AMMU_MODEL_NAME`, `AMMU_SESSIONS_DIR`, `AMMU_TELEMETRY_DIR`,
+  `LANGSMITH_*` — unchanged, all still optional.
+
+**Pilot access mechanism.** A single shared passcode, entered once per
+browser session on a plain "Private Pilot" screen
+(`render_access_gate()` in `ui/app.py`), rendered and checked *before*
+`main()` does anything else — before `get_store()`, before any
+session-state routing, before any Stage 1-5 or telemetry call is reachable.
+On success, `st.session_state.pilot_authenticated = True` is set (kept only
+in that browser session's in-memory Streamlit state, never written to a
+session file, never logged) and the entered code is immediately popped out
+of `session_state` so it doesn't linger any longer than necessary. This is
+a controlled-pilot gate, not a user-account system — there is still no
+concept of "a student" in the data model, and everyone who has the one
+shared code sees the same session-isolation behavior already documented in
+Section 5, P0 #2 (unchanged by this PR).
+
+**Fail-closed behavior**, all three cases now covered explicitly:
+- Access code unconfigured → `st.error` with a generic message, `st.stop()`
+  — the "Private Pilot" form itself never renders, and nothing past it is
+  reachable.
+- Access code configured, wrong/no code entered → gate stays up,
+  `st.error("That code isn't right. Try again.")`, `pilot_authenticated`
+  never gets set.
+- `OPENAI_API_KEY` unconfigured (checked only after authentication) →
+  same generic `st.error` + `st.stop()` pattern, no configuration detail or
+  stack trace shown.
+
+**Privacy considerations.** No new PII was introduced — the access code is
+a shared operational secret, not tied to any student identity. It is never
+persisted (no session file, no telemetry event, no log line references it,
+per `tests/test_pilot_access.py`'s logging test and the pop-after-use
+behavior above) and never appears in a URL (it's a Streamlit widget value
+over the app's own session state, not a query parameter). `.env.example`
+now documents `AMMU_PILOT_ACCESS_CODE` as a placeholder-only entry,
+consistent with `OPENAI_API_KEY`'s existing treatment there.
+
+**Intentionally not implemented in PR-2:** user accounts of any kind,
+per-user data partitioning (still the P0 #2 gap noted in Section 5),
+rate limiting/cost caps (still P1 #6), and any change to Stage 1-5,
+`app/orchestration.py`, `app/models.py`, `app/presentation.py`, or the
+telemetry package — none of those files were touched by this PR.
+
+**Tests added:** `tests/test_pilot_access.py` (9 tests — pure logic: env
+read, fail-closed on unset/empty, constant-time comparison correctness,
+never-logged, `.env.example` placeholder-only) and
+`tests/test_ui_pilot_access.py` (7 tests — Streamlit `AppTest`-level
+boundary tests: gate blocks/allows/rejects correctly, fails closed with no
+code configured, unauthenticated sessions never construct a `SessionStore`
+or reach a review-triggering widget, authenticated sessions reach the
+existing Screen A unchanged, missing `OPENAI_API_KEY` fails gracefully
+post-authentication). All 21 pre-existing offline UI tests across
+`tests/test_ui_screen_c.py`, `tests/test_ui_screen_d.py`,
+`tests/test_ui_app_live.py`, `tests/test_ui_screen_c_live.py`, and
+`tests/test_ui_screen_d_live.py` were updated to prime
+`at.session_state["pilot_authenticated"] = True` before their first
+`.run()` — the minimal change required so the new gate doesn't block tests
+that were written to exercise Screens A-D directly, per this project's own
+"do not fix/refactor unrelated things" convention (no other line in any of
+those files changed).
+
+**Regression:** full suite, 210 passed (194 before PR-2, +16 new pilot
+access tests), one clean run, no code-related flake.

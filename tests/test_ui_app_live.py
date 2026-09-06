@@ -39,6 +39,7 @@ def test_hannah_clarke_setup_and_understand_screens(isolated_sessions_dir):
     rubric_text = (DATA_DIR / "hannah_clarke_rubric.md").read_text()
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.run(timeout=120)
 
     assert not at.exception

@@ -30,3 +30,11 @@ def get_model() -> ChatOpenAI:
         model=os.getenv("AMMU_MODEL_NAME", DEFAULT_MODEL_NAME),
         temperature=0,
     )
+
+
+def is_openai_api_key_configured() -> bool:
+    """Presence check only, not a validity check -- confirming the key is
+    genuinely valid would require a real API call, which this deliberately
+    avoids. Lets the UI fail fast with a safe, generic message instead of a
+    raw construction error surfacing from deep inside ChatOpenAI."""
+    return bool(os.getenv("OPENAI_API_KEY"))

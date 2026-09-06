@@ -44,6 +44,7 @@ def test_hannah_clarke_full_flow_through_screen_c(isolated_sessions_dir):
     student_work_text = (DATA_DIR / "hannah_clarke_student_work.md").read_text()
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.run(timeout=120)
 
     at.text_input[0].input("Hannah Clarke Case Study")

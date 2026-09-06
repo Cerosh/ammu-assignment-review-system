@@ -419,6 +419,14 @@ tracing is enabled automatically if you set the standard
 `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` variables; no code change is
 needed either way.
 
+`ui/app.py` sits behind a private-pilot access gate
+(`src/ammu_review/pilot_access.py`) — set `AMMU_PILOT_ACCESS_CODE` in
+`.env` (or leave it unset for local development; the app will show a
+"not set up yet" message rather than becoming accidentally public) to
+require a shared passcode before the app is reachable. See
+`.ai/PRODUCTION_READINESS.md` for the full pilot-access and deployment
+writeup.
+
 ## Running Stages 1–5
 
 ```bash

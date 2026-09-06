@@ -34,10 +34,43 @@ from ammu_review.app import (
     record_priority_viewed,
     submit_draft,
 )
+from ammu_review.config import is_openai_api_key_configured
+from ammu_review.pilot_access import check_access_code, get_pilot_access_code
 
 st.set_page_config(page_title="Ammu's Assignment Coach", page_icon="🎓")
 
 TRUST_CAPTION = "This is AI feedback, not your teacher's grade. Your teacher stays the final say."
+
+
+def render_access_gate() -> bool:
+    """Private pilot access gate -- must be called, and must block
+    everything else, before any assignment/review functionality is
+    reachable. Returns True once this browser session is authenticated.
+
+    Fails closed: a missing access code is treated as "block everyone",
+    never as "no gate configured". Never logs or persists the code the
+    student enters -- it lives only in this browser session's in-memory
+    Streamlit state, cleared immediately after a successful check.
+    """
+    if st.session_state.get("pilot_authenticated", False):
+        return True
+
+    expected_code = get_pilot_access_code()
+    if not expected_code:
+        st.error("This app isn't set up yet. Please check back later.")
+        st.stop()
+
+    st.title("Private Pilot")
+    st.caption("Enter your access code to continue.")
+    candidate = st.text_input("Access code", type="password", key="pilot_access_code_input")
+    if st.button("Continue"):
+        if check_access_code(candidate, expected_code):
+            st.session_state.pilot_authenticated = True
+            st.session_state.pop("pilot_access_code_input", None)
+            st.rerun()
+        else:
+            st.error("That code isn't right. Try again.")
+    return False
 
 
 @st.cache_resource
@@ -445,6 +478,13 @@ def render_toughest_teacher_screen(store: SessionStore) -> None:
 
 
 def main() -> None:
+    if not render_access_gate():
+        return
+
+    if not is_openai_api_key_configured():
+        st.error("This app isn't set up yet. Please check back later.")
+        st.stop()
+
     store = get_store()
     if "assignment_id" not in st.session_state:
         st.session_state.assignment_id = None

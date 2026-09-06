@@ -206,6 +206,7 @@ def test_screen_c_renders_priority_prominently(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -224,6 +225,7 @@ def test_screen_c_never_displays_a_raw_issue_id(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -238,6 +240,7 @@ def test_screen_c_never_introduces_replacement_text(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -249,6 +252,7 @@ def test_screen_c_student_question_is_a_genuine_question(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -260,6 +264,7 @@ def test_screen_c_shows_rubric_trajectory_with_estimate_labelled(populated_store
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -274,6 +279,7 @@ def test_screen_c_shows_strengths(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -286,6 +292,7 @@ def test_screen_c_other_issues_are_collapsed_and_exclude_the_priority(populated_
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -310,6 +317,7 @@ def test_screen_c_handles_missing_rubric_gracefully(populated_store):
     store.save(session)
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -325,6 +333,7 @@ def test_screen_c_handles_missing_priority_gracefully(populated_store):
     store.save(session)
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -338,6 +347,7 @@ def test_screen_c_emits_priority_viewed_once_and_deduplicates_on_rerun(populated
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -371,6 +381,7 @@ def test_screen_c_telemetry_failure_does_not_break_the_screen(populated_store, m
     monkeypatch.setenv("AMMU_TELEMETRY_DIR", str(telemetry_dir))
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
@@ -383,6 +394,7 @@ def test_back_to_assignment_overview_returns_to_screen_b(populated_store):
     store, session, draft = populated_store
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["pilot_authenticated"] = True
     at.session_state["assignment_id"] = session.assignment.id
     at.session_state["draft_id"] = draft.id
     at.run(timeout=60)
