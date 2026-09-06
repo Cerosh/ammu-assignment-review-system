@@ -7,16 +7,35 @@ from any UI framework means the UI layer never touches a Stage 1-5 field
 name directly (see the Student Experience design proposal, sections 8 and
 16).
 
-Only Stage 1 (Assignment Understanding) and Stage 2 (Rubric / Success
-Criteria) are covered here -- that's what Screens A/B need. Translators for
-Stage 3 / Rubric Trajectory / Stage 4 / Stage 5 are a Screen C/D concern,
-not built yet.
+Stage 1 (Assignment Understanding) and Stage 2 (Rubric / Success Criteria)
+translators below serve Screens A/B. Stage 3 (Student Work Review), Rubric
+Trajectory, and Stage 4 (Priority Coach) translators below serve Screen C
+("Your Review"). Stage 5 (Toughest Teacher) translators are a future
+Screen D concern, not built yet.
 """
 
 from __future__ import annotations
 
+from typing import Optional
+
 from ..assignment_understanding import AssignmentUnderstanding
+from ..priority_coach import PriorityCoach
 from ..rubric_success_criteria import RubricCriterion, RubricSuccessCriteria
+from ..student_work_review import RubricTrajectory, StudentWorkReview, grade_for_percent
+
+_CATEGORY_LABELS = {
+    "content": "What you wrote",
+    "evidence": "Your evidence",
+    "analysis": "Your thinking and analysis",
+    "accuracy": "Getting the facts right",
+    "structure": "How it's organised",
+    "grammar": "Grammar and wording",
+    "rubric": "Meeting the rubric",
+}
+
+
+def _translate_category(category: str) -> str:
+    return _CATEGORY_LABELS.get(category, category)
 
 
 def present_rubric_criterion(criterion: RubricCriterion) -> dict:
@@ -59,3 +78,119 @@ def present_success_criteria(success_criteria: RubricSuccessCriteria) -> dict:
         "checklist": success_criteria.success_checklist,
         "limitations": success_criteria.limitations,
     }
+
+
+# --- Screen C: "Your Review" ---------------------------------------------------
+#
+# Translators for Stage 3 (Student Work Review), Rubric Trajectory, and
+# Stage 4 (Priority Coach). Deliberately never expose a raw issue id,
+# criterion object, or model field name -- only plain strings/dicts a
+# Grade-9 student would actually read. No AI calls happen here.
+
+
+def present_priority(priority_coach: Optional[PriorityCoach]) -> dict:
+    """Tier 1: the ONE thing to fix. Never exposes priority_issue_id or the
+    raw priority_category -- only the coaching language and the rubric
+    criterion it's tied to."""
+    if priority_coach is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "priority_statement": priority_coach.priority_statement,
+        "why_it_matters": priority_coach.why_this_matters,
+        "criterion": {
+            "code": priority_coach.primary_criterion.criterion_code,
+            "name": priority_coach.primary_criterion.criterion_name,
+        },
+        "student_question": priority_coach.student_question,
+    }
+
+
+def present_rubric_trajectory(trajectory: Optional[RubricTrajectory]) -> dict:
+    """Tier 2: where you stand. Never invents a grade -- a per-criterion
+    grade is only shown when the trajectory itself supplied a percentage,
+    computed via the SAME deterministic grade_for_percent()/boundaries the
+    engine already used for the overall estimate, never a new calculation."""
+    if trajectory is None:
+        return {"available": False, "message": "We don't have a rubric trajectory for this draft yet."}
+    if not trajectory.rubric_provided:
+        return {
+            "available": False,
+            "message": (
+                "Where you stand against the rubric isn't available because no "
+                "marking rubric was supplied for this task."
+            ),
+        }
+
+    boundaries = tuple(trajectory.grade_boundaries_used)
+    criteria = []
+    for c in trajectory.criteria:
+        estimated_grade = grade_for_percent(c.estimated_score_percent, boundaries) if boundaries else None
+        criteria.append(
+            {
+                "code": c.criterion_code,
+                "name": c.criterion_name,
+                "estimated_grade": estimated_grade,
+                "confidence": c.confidence,
+                "rationale": c.rationale,
+                "limitation": c.limitation,
+            }
+        )
+
+    return {
+        "available": True,
+        "overall_estimated_grade": trajectory.estimated_grade,
+        "overall_confidence": trajectory.overall_confidence,
+        "biggest_opportunity": trajectory.biggest_opportunity,
+        "next_boundary_requirements": trajectory.next_boundary_requirements,
+        "criteria": criteria,
+        "limitations": trajectory.limitations,
+    }
+
+
+def present_rubric_check(student_work_review: Optional[StudentWorkReview]) -> dict:
+    """Tier 3: a concise per-criterion check -- current level, what's
+    working, what's missing. Not a repeat of the whole rubric."""
+    if student_work_review is None or not student_work_review.rubric_assessment:
+        return {"available": False}
+    return {
+        "available": True,
+        "criteria": [
+            {
+                "code": a.criterion_code,
+                "name": a.criterion_name,
+                "current_level": a.current_level,
+                "whats_working": a.evidence,
+                "whats_missing": a.gap_to_next_level,
+            }
+            for a in student_work_review.rubric_assessment
+        ],
+    }
+
+
+def present_other_issues(
+    student_work_review: Optional[StudentWorkReview],
+    priority_issue_id: Optional[str],
+) -> list[dict]:
+    """Tier 4: everything else Stage 3 noticed, minus whichever issue
+    already became the Tier 1 priority -- meant for a collapsed section,
+    never the main event. Never exposes a raw issue id."""
+    if student_work_review is None:
+        return []
+    return [
+        {
+            "category": _translate_category(issue.category),
+            "observation": issue.observation,
+            "why_it_matters": issue.why_it_matters,
+        }
+        for issue in student_work_review.issues
+        if issue.id != priority_issue_id
+    ]
+
+
+def present_strengths(student_work_review: Optional[StudentWorkReview]) -> list[str]:
+    """The specific strengths Stage 3 already found -- never generic praise
+    invented here."""
+    if student_work_review is None:
+        return []
+    return list(student_work_review.strengths)

@@ -309,3 +309,31 @@ async def challenge_draft(
     )
 
     return draft
+
+
+def record_priority_viewed(
+    assignment_id: str,
+    draft_id: str,
+    priority_issue_id: Optional[str] = None,
+    priority_category: Optional[str] = None,
+    recorder: Optional[TelemetryRecorder] = None,
+) -> None:
+    """Record that the student actually reached/viewed the priority section
+    on Screen C -- a genuine UI interaction, not a system-side event, so
+    there is no stage call or persistence here, just a telemetry emission.
+    This is orchestration.py's only UI-triggered event and stays here (not
+    in ui/app.py) so orchestration.py remains the sole integration point
+    between the application layer and telemetry (see .ai/TELEMETRY.md).
+
+    Callers are responsible for their own once-per-view deduplication --
+    ui/app.py does this with a Streamlit session_state flag keyed by draft
+    id, since this function itself has no way to know whether a given
+    browser session already recorded this draft's view.
+    """
+    recorder = recorder or TelemetryRecorder()
+    recorder.record(
+        EventType.PRIORITY_VIEWED,
+        assignment_id=assignment_id,
+        draft_id=draft_id,
+        metadata={"priority_issue_id": priority_issue_id, "priority_category": priority_category},
+    )
