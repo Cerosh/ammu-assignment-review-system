@@ -11,11 +11,13 @@ from .presentation import (
     present_assignment_understanding,
     present_other_issues,
     present_priority,
+    present_revision_comparison,
     present_rubric_check,
     present_rubric_criterion,
     present_rubric_trajectory,
     present_strengths,
     present_success_criteria,
+    present_toughest_teacher,
 )
 from .store import SessionStore
 
@@ -36,4 +38,6 @@ __all__ = [
     "present_rubric_check",
     "present_other_issues",
     "present_strengths",
+    "present_toughest_teacher",
+    "present_revision_comparison",
 ]

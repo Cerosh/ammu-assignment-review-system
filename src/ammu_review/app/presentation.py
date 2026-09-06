@@ -10,8 +10,8 @@ name directly (see the Student Experience design proposal, sections 8 and
 Stage 1 (Assignment Understanding) and Stage 2 (Rubric / Success Criteria)
 translators below serve Screens A/B. Stage 3 (Student Work Review), Rubric
 Trajectory, and Stage 4 (Priority Coach) translators below serve Screen C
-("Your Review"). Stage 5 (Toughest Teacher) translators are a future
-Screen D concern, not built yet.
+("Your Review"). Stage 5 (Toughest Teacher) translators serve Screen D
+("Toughest Teacher").
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ..assignment_understanding import AssignmentUnderstanding
 from ..priority_coach import PriorityCoach
 from ..rubric_success_criteria import RubricCriterion, RubricSuccessCriteria
 from ..student_work_review import RubricTrajectory, StudentWorkReview, grade_for_percent
+from ..toughest_teacher import ToughestTeacherReview
 
 _CATEGORY_LABELS = {
     "content": "What you wrote",
@@ -194,3 +195,79 @@ def present_strengths(student_work_review: Optional[StudentWorkReview]) -> list[
     if student_work_review is None:
         return []
     return list(student_work_review.strengths)
+
+
+# --- Screen D: "Toughest Teacher" ------------------------------------------------
+#
+# Translator for Stage 5 (Toughest Teacher Review). Never exposes a raw
+# issue id, rank, or internal category string -- only the coaching language,
+# the criteria it's tied to, and the genuine questions it leaves Ammu with.
+# No AI calls happen here.
+
+_PRIORITY_STATUS_LABELS = {
+    "resolved": "You addressed the challenge",
+    "partially_resolved": "You've made progress, but something still needs strengthening",
+    "unresolved": "The main challenge is still there",
+}
+
+
+def present_toughest_teacher(review: Optional[ToughestTeacherReview]) -> dict:
+    """Tiers 1 (verdict), 2 (still-unresolved challenges), 3 (what would
+    change the teacher's mind), and 4 (the final challenge)."""
+    if review is None:
+        return {"available": False}
+
+    had_previous_priority_to_check = review.priority_status is not None
+    return {
+        "available": True,
+        "had_previous_priority_to_check": had_previous_priority_to_check,
+        "verdict": _PRIORITY_STATUS_LABELS.get(review.priority_status) if review.priority_status else None,
+        "priority_status_explanation": review.priority_status_explanation,
+        "overall_judgment": review.overall_judgment,
+        "trajectory_challenge": review.trajectory_challenge,
+        "current_grade": review.current_grade,
+        "unresolved_issues": [
+            {
+                "category": _translate_category(challenge.category),
+                "related_criteria": [
+                    {"code": ref.criterion_code, "name": ref.criterion_name}
+                    for ref in challenge.related_criteria
+                ],
+                "observation": challenge.observation,
+                "why_it_matters": challenge.why_it_matters,
+                "teacher_challenge": challenge.teacher_challenge,
+                "student_question": challenge.student_question,
+            }
+            for challenge in review.unresolved_issues
+        ],
+        "resolved_or_adequately_addressed": review.resolved_or_adequately_addressed,
+        "what_would_change_my_mind": review.what_would_change_my_mind,
+        "final_student_question": review.final_student_question,
+        "final_improvement_target": review.final_improvement_target,
+        "limitations": review.limitations,
+    }
+
+
+def present_revision_comparison(
+    current_trajectory: Optional[RubricTrajectory],
+    previous_trajectory: Optional[RubricTrajectory],
+) -> dict:
+    """A deterministic comparison between two drafts' already-computed
+    trajectories -- never a new scoring system, just a diff of grades the
+    engine already produced. Returns not-available when either side is
+    missing, rather than guessing."""
+    if current_trajectory is None or previous_trajectory is None:
+        return {"available": False}
+
+    previous_grade = previous_trajectory.estimated_grade
+    current_grade = current_trajectory.estimated_grade
+    trajectory_changed = None
+    if previous_grade is not None and current_grade is not None:
+        trajectory_changed = previous_grade != current_grade
+
+    return {
+        "available": True,
+        "previous_grade": previous_grade,
+        "current_grade": current_grade,
+        "trajectory_changed": trajectory_changed,
+    }

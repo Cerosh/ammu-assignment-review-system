@@ -1,8 +1,7 @@
 """Streamlit student experience -- Screens A (Assignment Setup), B
-(Understand This Assignment), and C (Your Review). See the Student
-Experience design proposal for the full recommended screen set; Screens D
-(Toughest Teacher Challenge) and E (Reflection) are future phases, not
-started yet.
+(Understand This Assignment), C (Your Review), and D (Toughest Teacher).
+See the Student Experience design proposal for the full recommended screen
+set; Screen E (Reflection) is a future phase, not started yet.
 
 This is a thin presentation shell only:
 - All orchestration goes through ``ammu_review.app`` (the application/
@@ -21,14 +20,17 @@ import streamlit as st
 
 from ammu_review.app import (
     SessionStore,
+    challenge_draft,
     create_assignment,
     present_assignment_understanding,
     present_other_issues,
     present_priority,
+    present_revision_comparison,
     present_rubric_check,
     present_rubric_trajectory,
     present_strengths,
     present_success_criteria,
+    present_toughest_teacher,
     record_priority_viewed,
     submit_draft,
 )
@@ -191,11 +193,13 @@ def render_review_screen(store: SessionStore) -> None:
     with left:
         if st.button("← Back to assignment overview"):
             st.session_state.draft_id = None
+            st.session_state.show_toughest_teacher = False
             st.rerun()
     with right:
         if st.button("Start a different assignment"):
             st.session_state.assignment_id = None
             st.session_state.draft_id = None
+            st.session_state.show_toughest_teacher = False
             st.rerun()
 
     if draft.student_work_review is None:
@@ -305,6 +309,140 @@ def render_review_screen(store: SessionStore) -> None:
             for item in draft.student_work_review.limitations:
                 st.write(item)
 
+    st.divider()
+    st.header("Ready to try the Toughest Teacher?")
+    st.write(
+        "Once you've worked on your priority above, you can put your revised work in front of "
+        "the toughest teacher -- an extra, optional challenge, not something you have to do."
+    )
+    if st.button("Try the Toughest Teacher"):
+        st.session_state.show_toughest_teacher = True
+        st.rerun()
+
+    st.divider()
+    st.header("Revising your work?")
+    st.caption("Your current draft is saved. Submit your revised version below when you're ready.")
+    revision_text = st.text_area("Your revised draft", height=300, key="revision_text_input")
+    if st.button("Submit my revision", disabled=not revision_text.strip()):
+        with st.spinner("Reviewing your revised draft... this can take a minute."):
+            new_draft = _run(submit_draft(store, assignment.id, revision_text))
+        st.session_state.draft_id = new_draft.id
+        st.session_state.show_toughest_teacher = False
+        st.rerun()
+
+
+def render_toughest_teacher_screen(store: SessionStore) -> None:
+    session = store.load(st.session_state.assignment_id)
+    assignment = session.assignment
+    draft = next((d for d in session.drafts if d.id == st.session_state.draft_id), None)
+
+    if draft is None:
+        st.session_state.draft_id = None
+        st.session_state.show_toughest_teacher = False
+        st.rerun()
+        return
+
+    st.title("Toughest Teacher")
+    st.caption(TRUST_CAPTION)
+
+    if st.button("← Back to your review"):
+        st.session_state.show_toughest_teacher = False
+        st.rerun()
+
+    if draft.toughest_teacher_review is None:
+        st.header("Ready for the Toughest Teacher?")
+        st.write(
+            "This is the part where I challenge your revised work as if I were your toughest "
+            "teacher. It's meant to be demanding -- that's the point, not a punishment."
+        )
+        if st.button("Challenge my work"):
+            with st.spinner("Reviewing as your toughest teacher..."):
+                _run(challenge_draft(store, assignment.id, draft.id))
+            st.rerun()
+        return
+
+    review = present_toughest_teacher(draft.toughest_teacher_review)
+
+    # --- Tier 1: the verdict ---------------------------------------------------
+    st.header("The verdict")
+    if review["had_previous_priority_to_check"]:
+        st.markdown(f"**{review['verdict']}**")
+    else:
+        st.info(
+            "There wasn't an earlier priority to check against for this draft, so the toughest "
+            "teacher couldn't judge whether a previous challenge was resolved."
+        )
+    st.write(review["priority_status_explanation"])
+    if review["overall_judgment"]:
+        st.caption(review["overall_judgment"])
+
+    st.divider()
+
+    # --- Your progress (only shown when there's a genuine earlier draft) -------
+    source_id = draft.priority_coach_checked_source_draft_id
+    previous_draft = (
+        next((d for d in session.drafts if d.id == source_id), None)
+        if source_id and source_id != draft.id
+        else None
+    )
+    comparison = present_revision_comparison(
+        draft.rubric_trajectory, previous_draft.rubric_trajectory if previous_draft else None
+    )
+    if comparison["available"]:
+        st.header("Your progress")
+        if comparison["previous_grade"] and comparison["current_grade"]:
+            st.write(
+                f"Previous trajectory: **{comparison['previous_grade']}** → "
+                f"Current trajectory: **{comparison['current_grade']}**"
+            )
+            st.caption("(AI estimate, not your teacher's grade)")
+            if comparison["trajectory_changed"] is True:
+                st.success("Your estimated trajectory moved.")
+            elif comparison["trajectory_changed"] is False:
+                st.info("Your estimated trajectory hasn't moved yet.")
+        if review["trajectory_challenge"]:
+            st.write(review["trajectory_challenge"])
+        st.divider()
+
+    # --- Tier 2: what the toughest teacher still sees ---------------------------
+    if review["unresolved_issues"]:
+        st.header("What the toughest teacher still sees")
+        for issue in review["unresolved_issues"]:
+            with st.expander(issue["category"]):
+                st.write(issue["observation"])
+                st.markdown("**Why this matters:**")
+                st.write(issue["why_it_matters"])
+                st.markdown("**The challenge:**")
+                st.write(issue["teacher_challenge"])
+                st.markdown("**Think about this:**")
+                st.info(issue["student_question"])
+        st.divider()
+
+    if review["resolved_or_adequately_addressed"]:
+        with st.expander("What's now resolved or adequately addressed"):
+            for item in review["resolved_or_adequately_addressed"]:
+                st.markdown(f"- {item}")
+        st.divider()
+
+    # --- Tier 3: what would change my mind ---------------------------------------
+    if review["what_would_change_my_mind"]:
+        st.header("What would change the toughest teacher's mind?")
+        for item in review["what_would_change_my_mind"]:
+            st.markdown(f"- {item}")
+        st.divider()
+
+    # --- Tier 4: final challenge ---------------------------------------------------
+    st.header("Your final challenge")
+    st.markdown("**Think about this:**")
+    st.info(review["final_student_question"])
+    st.markdown("**Your target:**")
+    st.write(review["final_improvement_target"])
+
+    if review["limitations"]:
+        with st.expander("Things worth knowing"):
+            for item in review["limitations"]:
+                st.write(item)
+
 
 def main() -> None:
     store = get_store()
@@ -312,11 +450,15 @@ def main() -> None:
         st.session_state.assignment_id = None
     if "draft_id" not in st.session_state:
         st.session_state.draft_id = None
+    if "show_toughest_teacher" not in st.session_state:
+        st.session_state.show_toughest_teacher = False
 
     if st.session_state.assignment_id is None:
         render_setup_screen(store)
     elif st.session_state.draft_id is None:
         render_understand_screen(store)
+    elif st.session_state.show_toughest_teacher:
+        render_toughest_teacher_screen(store)
     else:
         render_review_screen(store)
 
