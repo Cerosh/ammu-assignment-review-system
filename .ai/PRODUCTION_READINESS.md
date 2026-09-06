@@ -1,0 +1,343 @@
+# Production Readiness
+
+Baseline assessment (PR-1). This is inspection and documentation only — no
+application behavior was changed to produce this document.
+
+## 1. Current Architecture
+
+This is a single-process Python application, not a web/API service in the
+Next.js sense. Everything runs inside one Streamlit process:
+
+```
+Browser (Streamlit's own JS/WebSocket client)
+  <-> Streamlit server process (ui/app.py, `streamlit run`)
+        -> Application layer (src/ammu_review/app/): models, SessionStore,
+           orchestration.py, presentation.py
+             -> Review engine, Stages 1-5 (frozen), one real OpenAI call
+                per stage via langchain-openai's ChatOpenAI
+             -> Telemetry (src/ammu_review/telemetry/), observer-only
+        -> Local filesystem: data/sessions/*.json, data/telemetry/*.jsonl
+```
+
+There is no separate frontend framework, no API server, and no database.
+`ui/app.py` is a thin Streamlit shell: it never calls a Stage 1-5 function
+directly and never renders anything not passed through
+`ammu_review.app.presentation` first.
+
+A second, unrelated tree exists at `_archive/nextjs-scaffold/` — a
+committed-but-inert Next.js/Vercel project scaffold (its own `package.json`,
+`vercel.json`, Playwright/Husky config, and a GitHub Actions workflow under
+`_archive/nextjs-scaffold/.github/workflows/`). It predates this project's
+actual Streamlit/Python direction. Confirmed inert: there is no top-level
+`.github/` directory, so GitHub Actions never discovers or runs that nested
+workflow, and nothing in `pyproject.toml`/`uv.lock`/the app imports anything
+from it.
+
+**Important finding:** `.ai/DEPLOYMENT.md` and `.ai/SECURITY.md` are also
+leftovers from that same generic scaffold/template set — they describe a
+Next.js + Vercel + Supabase static-website architecture ("Version 1 is a
+static website", "Current Framework: Next.js 15", RBAC roles like
+"Submitter"/"Moderator") that has nothing to do with this codebase. They do
+not reflect this project's actual architecture and were not used as a
+source of truth for this document. They should not be treated as
+authoritative until rewritten or clearly marked historical (see Section 5,
+P2).
+
+## 2. Current Deployment Model
+
+**A. Entry point:** `uv run streamlit run ui/app.py` (documented in
+`README.md`). A secondary CLI entry point, `uv run python -m ammu_review`
+(`src/ammu_review/__main__.py`), runs Stages 1-5 against files on disk with
+no UI — useful for engineering/debugging, not part of the student
+experience.
+
+**B. Frontend:** Streamlit only. Not React/Next.js, not a hybrid — the only
+Next.js material in the repo is the inert archived scaffold above.
+
+**C. Where the Python app runs:** wherever `streamlit run` is invoked —
+today, only a developer's local machine. No hosting is currently
+configured.
+
+**D. Session storage:** `src/ammu_review/app/store.py`'s `SessionStore`
+writes one JSON file per assignment to `data/sessions/`, a plain local
+directory. The path is overridable via `AMMU_SESSIONS_DIR`; the default
+resolves relative to the repo (`.../data/sessions`). Both `data/sessions/`
+and `data/telemetry/` are in `.gitignore`.
+
+**E. Telemetry storage:** `src/ammu_review/telemetry/store.py`'s
+`TelemetryStore` writes one append-only JSON Lines file per assignment to
+`data/telemetry/`, same configurable-directory pattern via
+`AMMU_TELEMETRY_DIR`. Directory-creation failure at this path is now caught
+inside `TelemetryRecorder.__init__` (see the just-completed fix) rather than
+crashing the caller.
+
+**F. OpenAI API key:** `src/ammu_review/config.py` calls `load_dotenv()`
+and reads `OPENAI_API_KEY` implicitly — `ChatOpenAI(...)` picks it up from
+the environment itself; no code ever reads or stores the key value.
+Locally it's supplied via a `.env` file loaded by `python-dotenv`.
+
+**G. Hardcoded secrets:** none found in tracked source. A repo-wide grep
+for API-key-shaped strings and `api_key = "..."` literals across `*.py` and
+`*.md` (excluding `.env*`) returned nothing. The local `.env` (gitignored,
+confirmed via `git log --all -- .env` to have never been tracked/committed)
+does contain real, live credentials (`OPENAI_API_KEY`, `TAVILY_API_KEY`,
+`LANGSMITH_API_KEY`) — this is expected local-development configuration,
+not a repository exposure, but it's worth the operator's awareness that
+these are live keys sitting in plaintext on disk locally.
+
+**H. Writable filesystem requirement:** yes, unconditionally. Both
+`SessionStore` and `TelemetryStore` call `mkdir(parents=True, exist_ok=True)`
+and write files at runtime. There is no in-memory or database-backed
+alternative today.
+
+**I. Single process / single user assumption:** yes, clearly. `ui/app.py`
+caches one `SessionStore` instance per server process via
+`@st.cache_resource`, and `SessionStore.list_assignment_ids()` is used
+directly to populate a "Resume an assignment" dropdown in the sidebar —
+**every visitor to the running app sees every assignment ID ever created on
+that instance and can open any of them.** There is no user concept, no
+login, no per-user partitioning anywhere in the application or data model.
+This is the single biggest architectural fact shaping the pilot
+recommendation below (see Section 5, P0).
+
+**J. Vercel-specific files:** none in the live application. The only
+Vercel-related file in the repo is `_archive/nextjs-scaffold/vercel.json`,
+part of the inert archived scaffold.
+
+**K. Can this be deployed to Vercel without architectural changes?** No.
+See Section 4.
+
+**L. Simplest reliable hosting for this architecture:** a small persistent
+host that runs `streamlit run` as a long-lived process with a real,
+persistent disk/volume mounted at the session/telemetry directory. See
+Section 3.
+
+## 3. Pilot Deployment Recommendation
+
+Goal, verbatim from the brief: "Ammu should be able to access the
+application remotely and use it for one or more real school assignments."
+That is a single-user (or very small, known set of users), low-traffic,
+low-concurrency workload where losing her review history to a
+filesystem reset would be a real (if recoverable-by-resubmitting) loss.
+Reliability of *persistence* matters more than scale here.
+
+**Recommended: a small container/VM host with a persistent volume,
+running the existing `streamlit run ui/app.py` process unchanged** — e.g.
+Render, Railway, or Fly.io (any of these work equally well; pick whichever
+the operator already has an account with). Concretely this means:
+
+- One long-running web service, build command `uv sync`, start command
+  `uv run streamlit run ui/app.py --server.port $PORT --server.address
+  0.0.0.0` (the port/address flags are the only concession the current code
+  needs — no application code change).
+- A persistent volume mounted at the directory pointed to by
+  `AMMU_SESSIONS_DIR` / `AMMU_TELEMETRY_DIR`, so `data/sessions/` and
+  `data/telemetry/` survive restarts and redeploys.
+- `OPENAI_API_KEY` (and optionally `AMMU_MODEL_NAME`, `LANGSMITH_*`) set as
+  that platform's environment variables/secrets, never in the repo.
+
+**Streamlit Community Cloud** was also considered — it's the most
+frictionless option (free, connects directly to the GitHub repo, has a
+built-in secrets manager) and would work for a brief demo. It is **not**
+recommended as the primary pilot host because its filesystem is not
+guaranteed persistent across app reboots/redeploys/inactivity-sleep — an
+idle-timeout wake or a redeploy could silently reset `data/sessions/` and
+`data/telemetry/`, quietly deleting Ammu's actual assignment history. It's
+a reasonable fallback for a throwaway demo, not for real assignment data
+the pilot is meant to preserve.
+
+## 4. Vercel Assessment
+
+**Not appropriate for the current implementation, and not recommended.**
+Two independent, architectural (not incidental) mismatches:
+
+1. **Runtime model.** Streamlit is a long-running, stateful Python process
+   that holds a persistent WebSocket connection per browser session and
+   re-executes the whole script top-to-bottom on every interaction. Vercel
+   serverless/edge functions are short-lived, stateless, request-scoped
+   invocations with no persistent WebSocket support and no guaranteed warm
+   process between requests. There is no way to run `streamlit run` as a
+   Vercel function without rewriting the entire UI in a framework Vercel
+   natively supports (Next.js, etc.) — which the brief explicitly rules
+   out ("Do not rebuild the UI just to use Vercel").
+2. **Filesystem.** Vercel's function filesystem is ephemeral and read-only
+   outside `/tmp`, and `/tmp` itself doesn't persist across invocations or
+   instances. `SessionStore`/`TelemetryStore` both require a durable,
+   shared, writable directory across every request for the same
+   assignment — structurally incompatible with Vercel's storage model
+   without introducing an external database/object store, which is also
+   out of scope for this PR.
+
+Vercel would only become viable after a genuine rearchitecture (a real
+frontend framework calling a stateless API layer backed by an external
+database) — a different, much larger project, not a configuration change.
+For this application as it exists today, a persistent-process host (Section
+3) is the correct and much simpler choice.
+
+## 5. Production Blockers
+
+### P0 — Before Ammu
+
+1. **No access control.** Deployed as-is, the app is a fully public,
+   unauthenticated endpoint that runs real OpenAI calls for anyone who has
+   the URL. Addressed by PR-2 (private pilot passcode).
+2. **No session/data isolation.** `store.list_assignment_ids()` is shown to
+   every visitor in the sidebar "Resume an assignment" dropdown — any
+   visitor who reaches the app can open *any* assignment ever created on
+   that instance, including another user's draft text and review results.
+   This is a genuine child-data exposure risk once the app is reachable by
+   more than one person. PR-2's access gate limits *who can reach the app
+   at all*, which is sufficient for a single-user (Ammu-only) pilot, but
+   does not add per-user partitioning — that remains a real limitation if
+   a second student is ever added (see P2, item 11).
+3. **Filesystem persistence must be a deliberate hosting choice.** An
+   ephemeral or ephemeral-on-idle host (e.g. most serverless platforms, or
+   free tiers that reset local disk) would silently lose Ammu's session and
+   telemetry files. The chosen host must mount a real persistent volume at
+   the session/telemetry directories (Section 3).
+4. **Secrets must come from the host's environment/secrets mechanism.**
+   `OPENAI_API_KEY` is currently supplied only via a local `.env`; the
+   deployed host must set it as a platform secret, and `.env` must never be
+   committed or baked into a deploy artifact (already gitignored — verify
+   this stays true on whichever host is chosen).
+
+### P1 — Before an external pilot beyond Ammu
+
+5. **Unhandled exceptions surface as raw Streamlit tracebacks.** Nothing in
+   `ui/app.py` wraps its `_run(...)` calls to `create_assignment`/
+   `submit_draft`/`challenge_draft` in a try/except — an OpenAI failure
+   (rate limit, network error, missing key) would currently show a raw
+   Python stack trace to the student rather than a friendly message. Not a
+   secret-exposure risk (no secret value is ever interpolated into an
+   exception anywhere in the codebase — verified by reading
+   `config.py`/`store.py`/`recorder.py`), but not acceptable UX for a
+   child user in a real pilot.
+6. **No rate limiting or cost cap**, per-session or global, on top of the
+   access gate. One authenticated user could still generate unbounded API
+   spend by repeatedly submitting drafts. Worth a soft cap before widening
+   beyond a single trusted user.
+7. **Streamlit production hardening not yet configured.** No
+   `.streamlit/config.toml` exists; Streamlit's default error-detail and
+   anonymous-usage-stats behavior has not been reviewed or explicitly set
+   for a production/child-facing deployment.
+8. **No operational log visibility confirmed.** Telemetry failures log at
+   `WARNING` via Python's stdlib `logging` module with no configured
+   handler/sink — whatever host is chosen must be confirmed to actually
+   capture and surface process stdout/stderr, or these warnings go nowhere
+   an operator will ever see.
+9. **No data retention/deletion policy** for session or telemetry files —
+   already flagged as future work in `.ai/TELEMETRY.md`'s own "Future
+   privacy work required" section; still open, and matters more once real
+   student data lives on a hosted disk rather than a developer's laptop.
+
+### P2 — Later
+
+10. `_archive/nextjs-scaffold/` and the generic, currently-inaccurate
+    `.ai/DEPLOYMENT.md` / `.ai/SECURITY.md` (and similarly templated files
+    like `.ai/GIT_WORKFLOW.md`) are stale scaffold artifacts from an
+    unrelated project template. They're inert today but already misled
+    this exact inspection task on first read — worth pruning or clearly
+    marking historical so a future reader (human or AI) doesn't mistake
+    them for this project's real deployment/security posture.
+11. True multi-user session isolation (per-student data partitioning, not
+    just a shared access passcode) — appropriate to defer while the pilot
+    is Ammu alone, necessary before a second student is added.
+12. Token/cost accounting telemetry (already documented as deferred in
+    `.ai/TELEMETRY.md`).
+13. Health-check endpoint, structured monitoring/alerting.
+
+## 6. Security and Privacy Findings
+
+All findings below are repository-grounded (grep/read/git-log verified),
+not theoretical:
+
+- No hardcoded secrets in any tracked `.py` or `.md` file (repo-wide grep
+  for key-shaped strings and `api_key = "..."` literals returned nothing
+  outside `.env*`, which is itself gitignored and confirmed never
+  committed).
+- No raw `assignment_text` or `student_work_text` ever reaches telemetry —
+  enforced by `TelemetryRecorder`/`app/orchestration.py`'s design and
+  covered by an existing test,
+  `tests/test_app_orchestration_telemetry.py::test_no_raw_student_work_text_appears_in_any_event`.
+- No PII fields exist anywhere in the data model at all — `Assignment`,
+  `Draft`, `AssignmentSession`, and `TelemetryEvent` (in
+  `app/models.py`/`telemetry/models.py`) have no name/email/school/teacher
+  field to accidentally populate; there's nothing to leak because it was
+  never modeled in the first place.
+- No secret value is ever string-interpolated into a log message or raised
+  exception anywhere in `config.py`, `store.py` (session or telemetry), or
+  `recorder.py` — confirmed by reading each file directly.
+- **The clearest real privacy gap is architectural, not a coding
+  mistake:** zero session isolation (Section 5, P0 #2). This is the finding
+  that matters most for a child user and is the direct motivation for
+  PR-2's access gate.
+- The local `.env` contains live, real API keys (OpenAI, Tavily,
+  LangSmith) in plaintext — normal for local dev, flagged here only so the
+  operator is aware these are real credentials, not placeholders, sitting
+  on this machine's disk.
+
+## 7. Cost Protection Findings
+
+- Exactly three call sites trigger any OpenAI call: `create_assignment()`
+  (Stage 1 + Stage 2), `submit_draft()` (Stage 3 + Rubric Trajectory +
+  Stage 4), and `challenge_draft()` (Stage 5) — all in
+  `src/ammu_review/app/orchestration.py`.
+- Every one of these is invoked from `ui/app.py` only behind an explicit
+  `st.button(...)`, each disabled while its input text is empty
+  (`disabled=not assignment_text.strip()`, etc.) — nothing calls a review
+  function automatically on page load or on an unrelated rerun.
+- **Stage 5 gating verified directly in code, not assumed:**
+  `render_toughest_teacher_screen` only renders the "Challenge my work"
+  button inside the `if draft.toughest_teacher_review is None:` branch —
+  gated on *persisted* state on the `Draft` object, not `session_state`, so
+  it cannot be silently re-triggered by a page refresh or a new browser
+  session; once a challenge review exists, the button to create another
+  one for that draft is never shown again.
+- No rate limiting, per-IP/per-session throttling, or budget cap exists
+  anywhere in the codebase today. Combined with the "no access control"
+  finding (Section 5, P0 #1), an undeployed-behind-a-gate instance is an
+  unmetered cost-generating endpoint for anyone who finds the URL — the
+  concrete reason PR-2's access gate is a P0, not a nice-to-have.
+
+## 8. Deployment Checklist
+
+For the next implementation phase (deployment itself, not part of PR-1/2):
+
+- [ ] Choose a persistent-process host with a mountable volume (Render,
+      Railway, Fly.io, or similar) — not Vercel, not a filesystem-ephemeral
+      free tier.
+- [ ] Set `OPENAI_API_KEY` (and optionally `AMMU_MODEL_NAME`, `LANGSMITH_*`)
+      as that host's environment variables/secrets — never in the repo or
+      build image.
+- [ ] Mount a persistent volume at `AMMU_SESSIONS_DIR` and
+      `AMMU_TELEMETRY_DIR` (set both explicitly rather than relying on the
+      package-relative default).
+- [ ] Set the PR-2 pilot access secret as a host environment variable.
+- [ ] Confirm the host captures process stdout/stderr so telemetry-failure
+      warnings are actually visible somewhere.
+- [ ] Start command: `uv sync && uv run streamlit run ui/app.py
+      --server.port $PORT --server.address 0.0.0.0` (adjust flags to the
+      host's port-injection convention).
+- [ ] Smoke-test after first deploy: create an assignment, submit a draft,
+      restart/redeploy the service, confirm the assignment is still listed
+      (proves the volume mount is real, not just configured).
+- [ ] Revisit P1 items (Section 5) before inviting anyone beyond Ammu.
+
+## 9. Explicitly Deferred
+
+Not part of PR-1, PR-2, or this baseline — intentionally out of scope for
+now:
+
+- Authentication system (real user accounts, OAuth/SSO, password reset).
+- Parent dashboard.
+- Teacher dashboard.
+- Learning profile / long-term student model.
+- LangGraph or any multi-agent architecture.
+- Database migration (flat-file JSON/JSONL remains appropriate at this
+  scale).
+- Full analytics platform (telemetry stays JSON Lines files, per
+  `.ai/TELEMETRY.md`).
+- Major UI redesign.
+- Enterprise security architecture (RBAC, audit logging, SSO, etc.).
+- Actual deployment/hosting execution — this document recommends an
+  approach; it does not stand up any infrastructure.
