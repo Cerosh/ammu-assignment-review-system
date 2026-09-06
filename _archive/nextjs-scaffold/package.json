@@ -1,0 +1,66 @@
+{
+  "name": "ammu-assignment-review-system",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build --turbopack",
+    "start": "next start",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "validate:no-contradiction": "tsx scripts/validate-no-self-contradiction.ts",
+    "validate:sprint-doc-contact": "tsx scripts/validate-sprint-doc-contact.ts",
+    "validate:sprint-consistency": "tsx scripts/validate-sprint-consistency.ts",
+    "validate:doc-freshness": "tsx scripts/validate-doc-freshness.ts",
+    "validate:docs": "npm run validate:sprint-consistency && npm run validate:no-contradiction && npm run validate:doc-freshness",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{js,jsx,mjs,json,css,md}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.23.0",
+    "next": "15.5.20",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "^1.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@eslint/eslintrc": "^3",
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.20",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lighthouse": "^12.8.2",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.9.4",
+    "prettier-plugin-tailwindcss": "^0.8.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.0",
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  }
+}

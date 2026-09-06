@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# uv / virtual environment
+.venv/
+
+# Environment
+.env
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Claude Code local settings (per-user, not shared)
+.claude/settings.local.json
+
+# Claude Code session runtime files (machine/session-specific, never shared)
+.claude/*.lock
+
+# Runtime application data (local pilot state, never source-controlled)
+data/sessions/
+data/telemetry/

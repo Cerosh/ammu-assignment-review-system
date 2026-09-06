@@ -1,0 +1,3 @@
+npm run validate:no-contradiction -- "$1"
+npm run validate:sprint-doc-contact -- "$1"
+npm run validate:doc-freshness -- "$1"
