@@ -351,6 +351,25 @@ async def test_telemetry_failure_does_not_break_submit_draft(tmp_path):
     assert "DRAFT1" in draft.priority_coach.priority_statement
 
 
+async def test_unusable_telemetry_directory_does_not_break_submit_draft(tmp_path, monkeypatch):
+    """A step earlier than test_telemetry_failure_does_not_break_submit_draft
+    above: here nothing injects a recorder at all, so submit_draft's own
+    `recorder or TelemetryRecorder()` default is what's exercised -- the
+    exact path that used to crash when TelemetryStore()'s directory
+    creation failed, since that happened outside any try/except."""
+    store = SessionStore(base_dir=tmp_path / "sessions")
+    session = await create_assignment(store, assignment_text="Task text.", model=_setup_model())
+
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("this is a file, not a directory")
+    monkeypatch.setenv("AMMU_TELEMETRY_DIR", str(blocking_file / "telemetry"))
+
+    draft = await submit_draft(store, session.assignment.id, "Draft 1 text.", model=_draft_model("DRAFT1"))
+
+    assert draft.priority_coach is not None
+    assert "DRAFT1" in draft.priority_coach.priority_statement
+
+
 async def test_no_raw_student_work_text_appears_in_any_event(tmp_path):
     store = SessionStore(base_dir=tmp_path)
     session = await create_assignment(store, assignment_text="Task text.", model=_setup_model())

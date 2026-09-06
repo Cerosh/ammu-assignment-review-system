@@ -53,3 +53,39 @@ def test_record_does_not_raise_when_the_store_fails(caplog):
         recorder.record(EventType.ASSIGNMENT_CREATED, assignment_id="a1")  # must not raise
 
     assert any("Telemetry write failed" in message for message in caplog.messages)
+
+
+def test_construction_does_not_raise_when_the_default_store_cannot_be_created(tmp_path, monkeypatch, caplog):
+    """The directory-creation failure this closes: TelemetryStore()'s
+    mkdir() used to happen outside any try/except, so a broken
+    AMMU_TELEMETRY_DIR crashed TelemetryRecorder() itself -- and every
+    orchestration.py function builds its recorder via the bare
+    `recorder or TelemetryRecorder()` default, so this used to crash the
+    caller (e.g. submit_draft), not just fail to log telemetry."""
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("this is a file, not a directory")
+    monkeypatch.setenv("AMMU_TELEMETRY_DIR", str(blocking_file / "telemetry"))
+
+    with caplog.at_level(logging.WARNING):
+        recorder = TelemetryRecorder()  # must not raise
+
+    assert recorder.store is None
+    assert any("Could not initialise telemetry storage" in message for message in caplog.messages)
+
+
+def test_record_is_a_safe_no_op_when_the_default_store_could_not_be_created(tmp_path, monkeypatch):
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("this is a file, not a directory")
+    monkeypatch.setenv("AMMU_TELEMETRY_DIR", str(blocking_file / "telemetry"))
+
+    recorder = TelemetryRecorder()
+    recorder.record(EventType.ASSIGNMENT_CREATED, assignment_id="a1")  # must not raise
+
+
+def test_explicitly_supplied_store_is_never_wrapped_even_if_it_could_raise_on_construction():
+    """An explicitly supplied store is trusted as-is -- only the default
+    construction path is defended, since a caller supplying its own store
+    is responsible for it."""
+    store = TelemetryStore.__new__(TelemetryStore)  # constructed without running __init__
+    recorder = TelemetryRecorder(store=store)
+    assert recorder.store is store
