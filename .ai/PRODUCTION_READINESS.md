@@ -433,3 +433,288 @@ those files changed).
 
 **Regression:** full suite, 210 passed (194 before PR-2, +16 new pilot
 access tests), one clean run, no code-related flake.
+
+## 11. PR-3 — Deployment + Runtime Safety
+
+### Deployment recommendation
+
+Unchanged from Section 3's baseline recommendation, re-confirmed rather
+than re-litigated: a small persistent-process host (Render, Railway, Fly.io
+— any works, pick whichever the operator already has an account with)
+running `uv sync && uv run streamlit run ui/app.py --server.port $PORT
+--server.address 0.0.0.0` as a single long-lived web service, with a
+persistent volume mounted at `AMMU_SESSIONS_DIR`/`AMMU_TELEMETRY_DIR`.
+Nothing in this inspection changed that conclusion — the application is
+still a single Streamlit process requiring a writable filesystem, and
+still structurally incompatible with Vercel for the same two reasons as
+before (stateful long-running process, no persistent writable storage on
+Vercel's serverless functions). `.streamlit/config.toml` (new in PR-3) now
+carries the small, non-secret Streamlit-level hardening this recommendation
+assumed: `client.showErrorDetails = false` (never show a raw traceback if
+one somehow reaches Streamlit's own error handling, on top of `ui/app.py`'s
+own `_run()` safety net below), `browser.gatherUsageStats = false`
+(disable Streamlit's own anonymous usage stats, separate from this
+project's telemetry, unnecessary for a child user), and `server.headless =
+true` (required by non-interactive hosts; harmless locally). Port/address
+binding is deliberately left to the host's own start command, not hardcoded
+here, since different hosts inject `$PORT` differently.
+
+### Required environment variables
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | Required | Read automatically by `ChatOpenAI`; app fails safely (generic message, no stack trace) if missing, via `config.is_openai_api_key_configured()` (PR-2). |
+| `AMMU_PILOT_ACCESS_CODE` | Required in any deployed environment | The private-pilot passcode gate (PR-2). Fails closed if unset. |
+| `AMMU_SESSIONS_DIR` | Should be set explicitly in deployment | Where session JSON files are written. Defaults to a path relative to the repo — fine locally, **wrong in any deployed environment** unless it points at a mounted persistent volume (see "Filesystem persistence" below). |
+| `AMMU_TELEMETRY_DIR` | Should be set explicitly in deployment | Same as above, for telemetry JSON Lines files. |
+| `AMMU_MAX_DRAFTS_PER_ASSIGNMENT` | Optional | New in PR-3 — caps draft/revision submissions per assignment (see "Cost protection" below). Default 10 is generous; only set this to something else deliberately. |
+| `AMMU_MODEL_NAME` | Optional | Overrides the default model. |
+| `LANGSMITH_*` | Optional | Standard LangChain tracing variables, unrelated to this app's own telemetry. |
+
+Verified directly in code, not assumed: `config.py`'s `load_dotenv()` +
+`os.getenv` reads, `pilot_access.py`'s `os.getenv`, `app/store.py` and
+`telemetry/store.py`'s `os.getenv(..., DEFAULT_..._DIR)` fallback pattern,
+and `cost_guard.py`'s `os.getenv` (new in PR-3) all read straight from the
+environment with no other configuration path — nothing here was assumed.
+
+### Filesystem persistence
+
+Both `SessionStore` and `TelemetryStore` call `self.base_dir.mkdir(parents=True,
+exist_ok=True)` in `__init__` and write plain files with no locking:
+`SessionStore.save()` does a full-file `write_text()` (last write wins);
+`TelemetryStore.append()` opens in append mode and writes one JSON line
+per event. Directories are created on first use, not at import time, so
+deployment doesn't need to pre-create them — but it does need the process
+to have write access to wherever `AMMU_SESSIONS_DIR`/`AMMU_TELEMETRY_DIR`
+point.
+
+**What survives a restart:** whatever the hosting platform's filesystem
+guarantees. If the chosen host provides a real persistent volume mounted
+at those paths, everything survives process restarts and redeploys. If it
+doesn't (an ephemeral or reset-on-redeploy filesystem — see Section 3's
+Streamlit Community Cloud caveat), **all of Ammu's session and telemetry
+data for every assignment is lost** on the next restart, with no warning
+to her and no way to recover it. This is not a database — there is no
+backup, no replication, no recovery path. Deploying this app on any host
+without confirming persistent storage would be deploying it in a way that
+can silently erase a real student's real work.
+
+**Restart/redeploy behavior**, precisely: on process start, both stores
+just `mkdir` (a no-op if the directory already exists) — an existing
+directory's files are read normally on next access, an absent one starts
+empty. There is no migration step, no schema versioning, nothing that
+could fail on restart beyond the directory/file permissions already
+covered above.
+
+**Two processes writing the same files:** not a concern for this pilot.
+The recommended deployment (Section 3) is a single long-running process,
+single replica — there is no multi-worker/multi-instance configuration
+here, and nothing in `SessionStore`/`TelemetryStore` uses file locking
+because nothing currently requires it. This would become a real risk only
+if the app were ever scaled to multiple concurrent replicas sharing one
+volume (a last-write-wins race on `SessionStore.save()`, or interleaved
+appends on `TelemetryStore.append()`) — explicitly out of scope for a
+single-student pilot, and not implemented here per the brief's instruction
+not to add file locking without a concrete issue. Documented as a known
+limitation (below), not fixed.
+
+### Runtime failure handling
+
+**Before this PR:** none of `ui/app.py`'s four call sites into the
+application layer (`create_assignment`, `submit_draft` ×2, `challenge_draft`)
+were wrapped in any error handling — a real OpenAI failure (network error,
+timeout, rate limit, an auth/configuration error, or any other model/API
+exception) would propagate all the way up through Streamlit's own script
+runner and render as a raw Python traceback in the browser. Confirmed by
+reading `ui/app.py` directly before making any change, not assumed.
+
+**Now:** every one of those four call sites is wrapped by a single shared
+helper, `_run(coro, action)` in `ui/app.py`, which:
+- Catches any `Exception` from the awaited call (this deliberately covers
+  the whole realistic failure surface listed above — network failure,
+  timeout, API unavailable, rate limit, authentication/configuration
+  error, and any other unexpected model/API exception — with one generic
+  handler, rather than trying to enumerate and special-case each one).
+- Shows the student one plain, friendly message: "Something went wrong
+  getting your review. Please try again in a moment -- if it keeps
+  happening, let your teacher or the app owner know." No traceback, no
+  internal detail, ever.
+- Logs `"<action> failed (<ExceptionTypeName>)."` at `WARNING` via Python's
+  standard `logging` module — enough for an operator to know *what*
+  failed and *roughly why* (the exception class), without logging the
+  exception's message or a full traceback. This is a deliberate choice:
+  some API client libraries echo request details (e.g. a masked API key
+  fragment) back into their exception's message text, so keeping the log
+  to type-name-only avoids that risk entirely rather than trying to
+  sanitise every possible library's message format.
+- Returns `None` on failure. Every call site checks for `None` and returns
+  immediately rather than touching an attribute of a missing result (which
+  would itself raise an `AttributeError` and defeat the whole point) —
+  this leaves the student on the same screen, with the same inputs still
+  in their widgets where Streamlit preserves them, free to just try again.
+
+**What this does NOT fix**, documented rather than solved (out of scope —
+would require touching `app/orchestration.py`, which is frozen for this
+PR): if a multi-stage call fails *partway through* (e.g. Stage 3 succeeds
+and gets persisted, then Stage 3b throws), the partially-completed draft
+is saved but there is no UI affordance to retry just the remaining stages
+for that specific draft — the student would need to submit a new
+draft/revision to get a fresh attempt. Rare in practice (this requires a
+failure mid-pipeline, not before or after it), and the resulting partial
+state renders gracefully rather than crashing (Screen C's presentation
+functions already handle `None` fields — verified by existing
+`test_app_presentation_screen_c.py` coverage), so the pilot is safe to run
+with this documented rather than fixed.
+
+### Cost protection
+
+**Verified directly from the code, not assumed**, exactly how many model
+calls each action costs and what already prevents runaway repetition:
+
+| Action | Model calls | Existing protection |
+|---|---|---|
+| A. Create assignment | 2 (Stage 1, Stage 2) | None beyond requiring the student to re-type the assignment/rubric text each time — a much weaker "accidental repeat" risk than a single button. |
+| B. Submit first draft | 3 (Stage 3, Rubric Trajectory, Stage 4) | New in PR-3: `AMMU_MAX_DRAFTS_PER_ASSIGNMENT` guard (below). |
+| C. Submit a revision | 3 (same three stages) | Same guard as B — both paths call the same `submit_draft()`, and both are now guarded identically. |
+| D. Press "Toughest Teacher" | 1 (Stage 5) | Already existed, reconfirmed by re-reading `ui/app.py::render_toughest_teacher_screen`: the "Challenge my work" button only renders `if draft.toughest_teacher_review is None`, gated on **persisted** draft state, not `session_state` — it cannot run twice for the same draft even across a full browser restart. No new guard needed or added here. |
+| E. Rerunning Streamlit (a widget interaction elsewhere on the page) | 0 | Every review-triggering call is behind an explicit `if st.button(...)`, which is `True` only on the exact rerun triggered by that click and `False` on every other rerun — confirmed by reading every call site; nothing runs on an unrelated widget interaction. |
+| F. Refreshing/reopening the browser | 0 | A real browser reload starts a brand-new Streamlit session with fresh `session_state` (`assignment_id`/`draft_id` reset to `None`), landing back on Screen A — no call happens automatically; the student would need to click through again from a clean state. |
+
+**New guard added:** `src/ammu_review/cost_guard.py`. Protects exactly one
+operation — submitting a draft or revision for review (`submit_draft`,
+actions B and C above; each "operation" is one submission, regardless of
+whether it's the first draft or a later revision, since both cost the
+same 3 calls and both are reachable repeatedly via "back to assignment
+overview" → resubmit). Default limit: 10 drafts per assignment,
+configurable via `AMMU_MAX_DRAFTS_PER_ASSIGNMENT`; a non-positive or
+non-numeric configured value falls back to the default rather than
+disabling the guard. When the limit is reached, `ui/app.py` shows a
+`st.warning(...)` in place of the draft/revision text area and submit
+button entirely (so the action is structurally unavailable, not just
+declined after the fact), naming no internal configuration beyond the
+limit number itself. Reaching the limit never touches, recomputes, or
+invalidates any already-completed draft/review — it only blocks
+submitting one more.
+
+**Why 10 is sufficient for the pilot:** the intended workflow is
+understand → draft → maybe revise once or twice → optionally challenge.
+Genuine use rarely exceeds 2-3 submissions per assignment; 10 leaves
+generous headroom for a thorough student without meaningfully capping
+normal work, while still stopping an accidental rapid-repeat-click or a
+runaway script well short of real cost. Stage 5 needed no equivalent new
+guard (see table above) and assignment creation wasn't guarded for the
+reason in the table's first row — both are documented conclusions from
+inspecting the existing code, not gaps.
+
+**Deliberately not implemented:** precise token/cost accounting. As
+`.ai/TELEMETRY.md` already documents, obtaining real per-call token/dollar
+figures would mean either modifying the frozen Stage 1-5 functions to
+extract usage metadata (out of scope) or a deeper LangChain callback
+integration not designed here. A simple operation count is preferable to
+an inaccurate dollar estimate at this stage, per this PR's own brief.
+
+### Streamlit rerun safety (verified, not changed)
+
+Inspected specifically for: does a browser refresh, an unrelated widget
+interaction, or a partially-completed session ever trigger a duplicate
+expensive call? Conclusion for all three: no, and nothing needed fixing.
+- Refresh: new session, fresh `session_state`, lands on Screen A — no call
+  fires without an explicit click (see table row F above).
+- Unrelated reruns: every expensive call is behind `if st.button(...)`,
+  which Streamlit guarantees is `True` only on its own triggering rerun.
+- Partial session: covered under "Runtime failure handling" above — a
+  half-completed draft renders gracefully rather than duplicating a call,
+  it just has no in-place retry affordance (documented limitation, not a
+  duplicate-call risk).
+
+Access control (PR-2) is unaffected: `render_access_gate()` still runs
+first in `main()`, before `get_store()` or any screen routing, and none of
+this PR's changes touch that ordering.
+
+### Health / availability
+
+No health-check endpoint was added. The recommended hosts (Render,
+Railway, Fly.io) determine health by whether the process is listening on
+the injected `$PORT` and responding to HTTP — which a running Streamlit
+server already does at its normal root path. A dedicated `/healthz`-style
+endpoint is unnecessary complexity for this deployment size and wasn't
+added, per the brief's explicit instruction not to add one enterprise
+platforms happen to expect if the actual chosen host doesn't need it.
+
+### Deployment checklist
+
+Manual steps for the next (deployment) phase — this PR does not perform
+any of these:
+
+1. Provision the host (Render/Railway/Fly.io), pointed at this repo.
+2. Set environment variables/secrets on the host: `OPENAI_API_KEY`,
+   `AMMU_PILOT_ACCESS_CODE`, `AMMU_SESSIONS_DIR`, `AMMU_TELEMETRY_DIR`
+   (pointed at the mounted volume path), optionally `AMMU_MODEL_NAME` /
+   `AMMU_MAX_DRAFTS_PER_ASSIGNMENT` / `LANGSMITH_*`.
+3. Mount a real persistent volume at the `AMMU_SESSIONS_DIR`/
+   `AMMU_TELEMETRY_DIR` path.
+4. Start command: `uv sync && uv run streamlit run ui/app.py --server.port
+   $PORT --server.address 0.0.0.0`.
+5. Work through the manual smoke test below.
+6. Restart/redeploy once, then re-check that an assignment created before
+   the restart is still listed — this is the one check that actually
+   proves the volume mount is real, not just configured.
+
+### Manual deployment smoke test
+
+Work through this by hand against the deployed URL — not an automated
+browser test, a checklist for a human:
+
+1. Application starts (the host reports the service healthy/running).
+2. Opening the URL shows the "Private Pilot" gate, not the app itself.
+3. An invalid access code is rejected and the gate stays up.
+4. The correct access code grants access and shows Screen A.
+5. An assignment can be created (paste task + rubric, submit).
+6. Assignment understanding (Screen B, top half) renders.
+7. Rubric/success-criteria processing (Screen B, bottom half) renders.
+8. A draft can be submitted.
+9. The review completes (Screen C renders fully).
+10. The priority ("Your biggest opportunity") appears.
+11. A revision can be submitted and produces a fresh review.
+12. "Toughest Teacher" (Screen D) runs and shows a verdict.
+13. Telemetry continues working (a `.jsonl` file appears for the
+    assignment under the configured `AMMU_TELEMETRY_DIR`, with no raw
+    assignment/student text in it).
+14. Temporarily unset `OPENAI_API_KEY` on the host and confirm the app
+    fails with the safe "isn't set up yet" message, not a stack trace —
+    then restore it.
+15. Temporarily unset `AMMU_PILOT_ACCESS_CODE` and confirm the app fails
+    closed (same safe message, gate never appears) — then restore it.
+16. Trigger a real API failure if practical (e.g. a temporarily invalid
+    key) and confirm the student sees the generic "something went wrong"
+    message, never a traceback — then restore the real key.
+17. Check the host's logs and the browser's page source/network tab for
+    the access code or API key — confirm neither ever appears.
+
+### Known limitations
+
+Not hidden, listed plainly:
+
+- **Shared pilot access code** — one passcode for everyone who has it, not
+  per-user accounts. Fine for a single trusted pilot user; not a
+  multi-user identity system.
+- **No per-user data isolation** — the sidebar "Resume an assignment" list
+  shows every assignment on the instance to anyone who has the pilot code
+  (documented since PR-1, unchanged by PR-2/PR-3's access gate, which
+  controls *who can reach the app*, not *what they can see once in*).
+- **Local filesystem persistence, no durable database** — session/telemetry
+  data survives only as long as the hosting platform's filesystem does;
+  see "Filesystem persistence" above for exactly what's at risk.
+- **No enterprise rate limiting** — `AMMU_MAX_DRAFTS_PER_ASSIGNMENT` is a
+  simple, generous, single-operation guard against accidental runaway
+  usage, not a real quota/billing system.
+- **No precise token/cost accounting** — `model_call_count` (existing
+  telemetry) and the new draft-count guard are both call-count proxies,
+  not dollar figures.
+- **No in-place retry for a mid-pipeline partial failure** — see "Runtime
+  failure handling" above; a new draft/revision submission is the
+  student's recovery path today.
+- **Two-process file-write races** — not a risk at single-replica scale
+  (the recommended deployment), but would become one if ever scaled to
+  multiple concurrent instances sharing one volume without adding file
+  locking or a real datastore first.

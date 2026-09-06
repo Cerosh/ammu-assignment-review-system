@@ -419,13 +419,26 @@ tracing is enabled automatically if you set the standard
 `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` variables; no code change is
 needed either way.
 
-`ui/app.py` sits behind a private-pilot access gate
-(`src/ammu_review/pilot_access.py`) — set `AMMU_PILOT_ACCESS_CODE` in
-`.env` (or leave it unset for local development; the app will show a
-"not set up yet" message rather than becoming accidentally public) to
-require a shared passcode before the app is reachable. See
-`.ai/PRODUCTION_READINESS.md` for the full pilot-access and deployment
-writeup.
+**Required environment variables**: `OPENAI_API_KEY` (the app fails safely
+with a generic message, not a stack trace, if it's missing).
+**Required in any deployed environment** (optional for local development):
+`AMMU_PILOT_ACCESS_CODE` — a shared passcode `ui/app.py` requires before
+showing anything else (`src/ammu_review/pilot_access.py`); unset locally,
+the app shows a safe "isn't set up yet" message rather than becoming
+accidentally public, so you only need to set it if you want to exercise
+the gate locally. **Optional**: `AMMU_MODEL_NAME`, `AMMU_MAX_DRAFTS_PER_ASSIGNMENT`
+(a generous default cap on draft/revision submissions per assignment, see
+`src/ammu_review/cost_guard.py`), `AMMU_SESSIONS_DIR` / `AMMU_TELEMETRY_DIR`
+(where session/telemetry files are written — **must** be set to a path on
+a real persistent volume in any deployed environment; see
+`.ai/PRODUCTION_READINESS.md` "Filesystem persistence" for what's lost
+without one).
+
+Whichever platform hosts this app, all of the above must be supplied as
+that platform's own environment variables/secrets — never commit `.env`
+or bake real values into a deploy artifact. See
+`.ai/PRODUCTION_READINESS.md` for the full deployment, pilot-access, cost
+protection, and runtime-safety writeup.
 
 ## Running Stages 1–5
 

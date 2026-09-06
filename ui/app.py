@@ -15,6 +15,7 @@ This is a thin presentation shell only:
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import streamlit as st
 
@@ -35,11 +36,22 @@ from ammu_review.app import (
     submit_draft,
 )
 from ammu_review.config import is_openai_api_key_configured
+from ammu_review.cost_guard import get_max_drafts_per_assignment, has_reached_draft_limit
 from ammu_review.pilot_access import check_access_code, get_pilot_access_code
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Ammu's Assignment Coach", page_icon="🎓")
 
 TRUST_CAPTION = "This is AI feedback, not your teacher's grade. Your teacher stays the final say."
+
+
+def _draft_limit_message() -> str:
+    return (
+        f"You've reached the maximum number of draft submissions ({get_max_drafts_per_assignment()}) "
+        "for this assignment during this pilot. If you need to submit more, please let your "
+        "teacher or the app owner know."
+    )
 
 
 def render_access_gate() -> bool:
@@ -78,8 +90,29 @@ def get_store() -> SessionStore:
     return SessionStore()
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(coro, action: str):
+    """Runs an async review/orchestration call, converting any failure
+    (network error, timeout, rate limit, missing/invalid API key, or any
+    other model/API exception) into a safe, student-facing message instead
+    of a raw traceback. Returns None on failure -- callers must check for
+    that and stop rendering rather than touch attributes of a missing
+    result, leaving the screen usable for another attempt.
+
+    Deliberately logs only the exception's type name, not its message or a
+    full traceback: some API client error messages echo back request
+    details (e.g. a masked API key fragment), so keeping the log to
+    type-only avoids that risk entirely rather than trying to sanitise
+    every possible exception's message text.
+    """
+    try:
+        return asyncio.run(coro)
+    except Exception as exc:
+        logger.warning("%s failed (%s).", action, type(exc).__name__)
+        st.error(
+            "Something went wrong getting your review. Please try again in a moment -- if it "
+            "keeps happening, let your teacher or the app owner know."
+        )
+        return None
 
 
 def render_setup_screen(store: SessionStore) -> None:
@@ -112,8 +145,11 @@ def render_setup_screen(store: SessionStore) -> None:
                     rubric_text=rubric_text or None,
                     teacher_instructions_text=teacher_instructions_text or None,
                     title=title or None,
-                )
+                ),
+                action="create_assignment",
             )
+        if session is None:
+            return
         st.session_state.assignment_id = session.assignment.id
         st.rerun()
 
@@ -198,13 +234,18 @@ def render_understand_screen(store: SessionStore) -> None:
 
     st.divider()
     st.header("Ready for feedback on your draft?")
-    st.caption("Paste what you've written so far to get your review.")
-    draft_text = st.text_area("Your draft", height=300, key="draft_text_input")
-    if st.button("Get my review", disabled=not draft_text.strip()):
-        with st.spinner("Reviewing your draft... this can take a minute."):
-            draft = _run(submit_draft(store, assignment.id, draft_text))
-        st.session_state.draft_id = draft.id
-        st.rerun()
+    if has_reached_draft_limit(len(session.drafts)):
+        st.warning(_draft_limit_message())
+    else:
+        st.caption("Paste what you've written so far to get your review.")
+        draft_text = st.text_area("Your draft", height=300, key="draft_text_input")
+        if st.button("Get my review", disabled=not draft_text.strip()):
+            with st.spinner("Reviewing your draft... this can take a minute."):
+                draft = _run(submit_draft(store, assignment.id, draft_text), action="submit_draft")
+            if draft is None:
+                return
+            st.session_state.draft_id = draft.id
+            st.rerun()
 
 
 def render_review_screen(store: SessionStore) -> None:
@@ -354,14 +395,19 @@ def render_review_screen(store: SessionStore) -> None:
 
     st.divider()
     st.header("Revising your work?")
-    st.caption("Your current draft is saved. Submit your revised version below when you're ready.")
-    revision_text = st.text_area("Your revised draft", height=300, key="revision_text_input")
-    if st.button("Submit my revision", disabled=not revision_text.strip()):
-        with st.spinner("Reviewing your revised draft... this can take a minute."):
-            new_draft = _run(submit_draft(store, assignment.id, revision_text))
-        st.session_state.draft_id = new_draft.id
-        st.session_state.show_toughest_teacher = False
-        st.rerun()
+    if has_reached_draft_limit(len(session.drafts)):
+        st.warning(_draft_limit_message())
+    else:
+        st.caption("Your current draft is saved. Submit your revised version below when you're ready.")
+        revision_text = st.text_area("Your revised draft", height=300, key="revision_text_input")
+        if st.button("Submit my revision", disabled=not revision_text.strip()):
+            with st.spinner("Reviewing your revised draft... this can take a minute."):
+                new_draft = _run(submit_draft(store, assignment.id, revision_text), action="submit_draft")
+            if new_draft is None:
+                return
+            st.session_state.draft_id = new_draft.id
+            st.session_state.show_toughest_teacher = False
+            st.rerun()
 
 
 def render_toughest_teacher_screen(store: SessionStore) -> None:
@@ -390,7 +436,9 @@ def render_toughest_teacher_screen(store: SessionStore) -> None:
         )
         if st.button("Challenge my work"):
             with st.spinner("Reviewing as your toughest teacher..."):
-                _run(challenge_draft(store, assignment.id, draft.id))
+                result = _run(challenge_draft(store, assignment.id, draft.id), action="challenge_draft")
+            if result is None:
+                return
             st.rerun()
         return
 

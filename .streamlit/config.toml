@@ -1,0 +1,22 @@
+# Minimal production hardening for the private pilot. No secrets belong in
+# this file -- it's committed to git. See .ai/PRODUCTION_READINESS.md
+# "Deployment recommendation" for the hosting approach this supports.
+
+[client]
+# Never show a raw Python traceback to the student on an uncaught
+# exception -- ui/app.py's own try/except (see _run()) is the primary
+# safety net; this is a second one for anything that reaches Streamlit's
+# own error handling instead.
+showErrorDetails = false
+
+[browser]
+# Disable Streamlit's own anonymous usage-stats collection -- separate
+# from this project's own telemetry (src/ammu_review/telemetry/), and
+# unnecessary given this serves a child user.
+gatherUsageStats = false
+
+[server]
+# Required for most non-interactive hosting platforms; has no effect on
+# local development. Port/address binding is left to the host's start
+# command (see README.md), since hosts inject $PORT differently.
+headless = true
